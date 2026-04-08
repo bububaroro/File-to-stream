@@ -3,127 +3,98 @@ import asyncio
 import secrets
 import traceback
 import uvicorn
-import re
-import logging
-from contextlib import asynccontextmanager
 
-from pyrogram import Client, filters, enums
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ChatMemberUpdated
-from pyrogram.errors import FloodWait, UserNotParticipant
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pyrogram.file_id import FileId
 from pyrogram import raw
-from pyrogram.session import Session, Auth
-import math
 
 from config import Config
 from database import db
 
-# ==================== FIXED SESSION ====================
+# ================= BOT =================
 bot = Client(
-    "sessions/SimpleStreamBot",   # ✅ IMPORTANT FIX
+    "sessions/bot",   # IMPORTANT
     api_id=Config.API_ID,
     api_hash=Config.API_HASH,
     bot_token=Config.BOT_TOKEN
 )
 
-multi_clients = {}
-work_loads = {}
-class_cache = {}
-
-# ==================== FASTAPI ====================
+# ================= FASTAPI =================
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ==================== STARTUP ====================
 @app.on_event("startup")
 async def startup():
-    print("Starting bot...")
     await db.connect()
     await bot.start()
-    multi_clients[0] = bot
-    work_loads[0] = 0
     print("Bot started")
 
 @app.on_event("shutdown")
 async def shutdown():
     await bot.stop()
 
-# ==================== BOT ====================
-@bot.on_message(filters.private & (filters.document | filters.video | filters.audio))
-async def file_handler(_, message: Message):
+# ================= BOT HANDLER =================
+@bot.on_message(filters.private & (filters.document | filters.video))
+async def handle(_, message: Message):
     try:
         sent = await message.copy(Config.STORAGE_CHANNEL)
-        unique_id = secrets.token_urlsafe(8)
+        uid = secrets.token_urlsafe(8)
+        await db.save_link(uid, sent.id)
 
-        await db.save_link(unique_id, sent.id)
-
-        link = f"{Config.BASE_URL}/show/{unique_id}"
+        link = f"{Config.BASE_URL}/show/{uid}"
 
         btn = InlineKeyboardMarkup([[InlineKeyboardButton("Open Link", url=link)]])
-        await message.reply_text("✅ File uploaded!", reply_markup=btn)
+        await message.reply_text("✅ Done", reply_markup=btn)
 
     except Exception:
         print(traceback.format_exc())
-        await message.reply_text("Error occurred")
 
-# ==================== ROUTES ====================
+# ================= ROUTES =================
 @app.get("/")
 async def home():
     return {"status": "ok"}
 
-@app.get("/show/{unique_id}", response_class=HTMLResponse)
-async def show_page(request: Request, unique_id: str):
-    return templates.TemplateResponse(
-        "show.html",
-        {"request": request, "unique_id": unique_id}   # ✅ FIX
-    )
+@app.get("/show/{uid}", response_class=HTMLResponse)
+async def show(request: Request, uid: str):
+    return templates.TemplateResponse("show.html", {"request": request})
 
-@app.get("/api/file/{unique_id}")
-async def api_file(unique_id: str):
-    message_id = await db.get_link(unique_id)
-    if not message_id:
+@app.get("/api/file/{uid}")
+async def file_api(uid: str):
+    mid = await db.get_link(uid)
+    if not mid:
         raise HTTPException(404)
 
-    msg = await bot.get_messages(Config.STORAGE_CHANNEL, message_id)
-    media = msg.document or msg.video or msg.audio
+    msg = await bot.get_messages(Config.STORAGE_CHANNEL, mid)
+    media = msg.document or msg.video
 
-    file_name = media.file_name or "file"
-
-    safe_name = "".join(c for c in file_name if c.isalnum() or c in "._- ")
+    name = media.file_name or "file"
+    safe = "".join(c for c in name if c.isalnum() or c in "._- ")
 
     base = Config.BASE_URL
 
     return {
-        "file_name": file_name,
+        "file_name": name,
         "file_size": media.file_size,
-        "is_media": True,
-        "direct_dl_link": f"{base}/dl/{message_id}/{safe_name}",
+        "direct_dl_link": f"{base}/dl/{mid}/{safe}",
 
-        # ✅ FIXED MX PLAYER
-        "mx_player_link": f"intent://{base.replace('https://','').replace('http://','')}/dl/{message_id}/{safe_name}#Intent;type=video/*;package=com.mxtech.videoplayer.ad;end",
+        "mx_player_link": f"intent://{base.replace('https://','').replace('http://','')}/dl/{mid}/{safe}#Intent;type=video/*;package=com.mxtech.videoplayer.ad;end",
 
-        "vlc_player_link": f"vlc://{base}/dl/{message_id}/{safe_name}"
+        "vlc_player_link": f"vlc://{base}/dl/{mid}/{safe}"
     }
 
-# ==================== STREAM ====================
-class ByteStreamer:
-    def __init__(self, client):
-        self.client = client
+# ================= STREAM =================
+@app.get("/dl/{mid}/{fname}")
+async def stream(mid: int, fname: str):
+    msg = await bot.get_messages(Config.STORAGE_CHANNEL, mid)
+    media = msg.document or msg.video
 
-    async def yield_file(self, file_id, offset, chunk_size):
-        client = self.client
+    file_id = FileId.decode(media.file_id)
+
+    async def generator():
         location = raw.types.InputDocumentFileLocation(
             id=file_id.media_id,
             access_hash=file_id.access_hash,
@@ -131,36 +102,18 @@ class ByteStreamer:
             thumb_size=""
         )
 
-        current = offset
+        offset = 0
         while True:
-            r = await client.invoke(
-                raw.functions.upload.GetFile(
-                    location=location,
-                    offset=current,
-                    limit=chunk_size
-                )
+            chunk = await bot.invoke(
+                raw.functions.upload.GetFile(location=location, offset=offset, limit=1024*1024)
             )
-            if not r.bytes:
+            if not chunk.bytes:
                 break
-            yield r.bytes
-            current += chunk_size
+            yield chunk.bytes
+            offset += 1024*1024
 
-@app.get("/dl/{mid}/{fname}")
-async def stream(mid: int, fname: str):
-    msg = await bot.get_messages(Config.STORAGE_CHANNEL, mid)
-    media = msg.document or msg.video or msg.audio
+    return StreamingResponse(generator(), media_type=media.mime_type)
 
-    file_id = FileId.decode(media.file_id)
-    file_size = media.file_size
-
-    streamer = ByteStreamer(bot)
-
-    return StreamingResponse(
-        streamer.yield_file(file_id, 0, 1024 * 1024),
-        media_type=media.mime_type,
-        headers={"Content-Length": str(file_size)}
-    )
-
-# ==================== MAIN ====================
+# ================= MAIN =================
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=10000)
