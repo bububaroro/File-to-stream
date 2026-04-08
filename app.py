@@ -281,10 +281,7 @@ async def health_check():
 async def show_page(request: Request, unique_id: str):
     return templates.TemplateResponse(
         "show.html",
-        {
-            "request": request,
-            "unique_id": unique_id   # ✅ ADD THIS
-        }
+        {"request": request}
     )
 
 @app.get("/api/file/{unique_id}", response_class=JSONResponse)
