@@ -1,8 +1,10 @@
-# .gitignore
 .env
 *.session
 *.session-journal
 __pycache__/
 *.pyc
 downloads/
-sessions/  # <-- Add this line
+
+# Allow folder but ignore session files
+sessions/*.session
+sessions/*.session-journal
