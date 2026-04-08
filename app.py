@@ -1,7 +1,6 @@
 import os
 import secrets
 import traceback
-import uvicorn
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
@@ -14,9 +13,9 @@ from pyrogram import raw
 from config import Config
 from database import db
 
-# ================= BOT (FIXED SESSION PATH) =================
+# ================= BOT (SAFE SESSION PATH) =================
 bot = Client(
-    "/tmp/bot",   # ✅ ALWAYS WORKS IN RENDER
+    "/tmp/bot",   # ✅ IMPORTANT: Render safe path
     api_id=Config.API_ID,
     api_hash=Config.API_HASH,
     bot_token=Config.BOT_TOKEN
@@ -48,6 +47,8 @@ async def shutdown():
 @bot.on_message(filters.private & (filters.document | filters.video | filters.audio))
 async def handle_file(_, message: Message):
     try:
+        print("📩 File received:", message.id)
+
         sent = await message.copy(Config.STORAGE_CHANNEL)
         uid = secrets.token_urlsafe(8)
 
@@ -55,7 +56,10 @@ async def handle_file(_, message: Message):
 
         link = f"{Config.BASE_URL}/show/{uid}"
 
-        btn = InlineKeyboardMarkup([[InlineKeyboardButton("Open Link", url=link)]])
+        btn = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Open Link", url=link)]
+        ])
+
         await message.reply_text("✅ File Uploaded", reply_markup=btn)
 
     except Exception:
@@ -132,8 +136,3 @@ async def stream(mid: int, fname: str):
     except Exception:
         print(traceback.format_exc())
         raise HTTPException(500, "Streaming error")
-
-# ================= MAIN =================
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run("app:app", host="0.0.0.0", port=port)
