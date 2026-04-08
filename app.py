@@ -63,7 +63,7 @@ async def handle_file(_, message: Message):
         await message.reply_text("❌ Error uploading file")
 
 # ================= ROUTES =================
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def home():
     return {"status": "ok", "message": "Server is running"}
 
